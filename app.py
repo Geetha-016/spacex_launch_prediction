@@ -1,6 +1,7 @@
 import streamlit as st
 import joblib
 import pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
 
 # ----------------- PAGE CONFIG -----------------
 st.set_page_config(page_title="SpaceX Launch Predictor", layout="centered")
@@ -11,21 +12,21 @@ st.write("Predict whether the first stage will land successfully based on launch
 model = joblib.load("spacex_model/model.joblib")
 scaler = joblib.load("spacex_model/scaler.pkl")
 
+# Calibrate probabilities (sigmoid)
+calibrated_model = CalibratedClassifierCV(model, cv='prefit', method='sigmoid')
+
 # ----------------- USER INPUTS -----------------
 st.sidebar.header("Enter Launch Parameters")
 
-# Numeric inputs
 flight_number = st.sidebar.number_input("Flight Number", 1, 200, 50)
 payload = st.sidebar.slider("Payload Mass (kg)", 0, 10000, 5000)
 flights = st.sidebar.number_input("Number of Flights", 1, 10, 1)
 block = st.sidebar.number_input("Block Version", 1, 10, 5)
 reused_count = st.sidebar.number_input("Reused Count", 0, 10, 0)
 
-# Categorical inputs
 orbit = st.sidebar.selectbox("Orbit Type", ["LEO", "GTO", "ISS", "SSO"])
 launch_site = st.sidebar.selectbox("Launch Site", ["CCAFS SLC 40", "KSC LC 39A", "VAFB SLC 4E"])
 
-# Boolean features (Grid Fins, Reused, Legs)
 grid_fins = st.sidebar.selectbox("Grid Fins", ["True", "False"])
 reused = st.sidebar.selectbox("Reused", ["True", "False"])
 legs = st.sidebar.selectbox("Legs", ["True", "False"])
@@ -56,23 +57,15 @@ all_columns = [
 # ----------------- CREATE DATAFRAME -----------------
 df = pd.DataFrame([[0]*len(all_columns)], columns=all_columns)
 
-# Fill numeric features
 df.loc[0, 'FlightNumber'] = flight_number
 df.loc[0, 'PayloadMass'] = payload
 df.loc[0, 'Flights'] = flights
 df.loc[0, 'Block'] = block
 df.loc[0, 'ReusedCount'] = reused_count
 
-# Fill categorical features
-orbit_column = f"Orbit_{orbit}"
-if orbit_column in df.columns:
-    df.loc[0, orbit_column] = 1
+df.loc[0, f"Orbit_{orbit}"] = 1
+df.loc[0, f"LaunchSite_{launch_site}"] = 1
 
-launch_column = f"LaunchSite_{launch_site}"
-if launch_column in df.columns:
-    df.loc[0, launch_column] = 1
-
-# Fill boolean features
 df.loc[0, f"GridFins_{grid_fins}"] = 1
 df.loc[0, f"Reused_{reused}"] = 1
 df.loc[0, f"Legs_{legs}"] = 1
@@ -80,16 +73,32 @@ df.loc[0, f"Legs_{legs}"] = 1
 # ----------------- PREDICTION -----------------
 if st.button("Predict Launch Outcome"):
     scaled = scaler.transform(df)
-    prediction = model.predict(scaled)[0]
-    prob = model.predict_proba(scaled)[0]
+    
+    try:
+        prob = calibrated_model.predict_proba(scaled)[0]
+        prediction = calibrated_model.predict(scaled)[0]
+    except:
+        prob = model.predict_proba(scaled)[0]
+        prediction = model.predict(scaled)[0]
 
+    success_prob = prob[1]*100
+    fail_prob = prob[0]*100
+
+    # Display result text
     if prediction == 1:
-        st.success("✅ Landing Successful!")
-        st.write(f"Confidence: {prob[1]*100:.2f}%")
+        st.success(f"✅ Landing Successful! Confidence: {success_prob:.2f}%")
     else:
-        st.error("❌ Landing Failed")
-        st.write(f"Confidence: {prob[0]*100:.2f}%")
+        st.error(f"❌ Landing Failed! Confidence: {fail_prob:.2f}%")
 
-# ----------------- DEBUG -----------------
-# Uncomment to inspect inputs
-# st.write(df)
+    # ----------------- DUAL COLOR PROBABILITY BAR -----------------
+    st.write("### Probability Distribution")
+    bar_html = f"""
+    <div style="width: 100%; height: 30px; background-color: #f0f0f0; border-radius: 5px;">
+        <div style="width: {success_prob}%; height: 100%; background-color: #4CAF50; float: left; border-radius: 5px 0 0 5px;"></div>
+        <div style="width: {fail_prob}%; height: 100%; background-color: #f44336; float: left; border-radius: 0 5px 5px 0;"></div>
+    </div>
+    <div style="text-align: center; font-weight: bold; margin-top: 5px;">
+        Success: {success_prob:.2f}% | Fail: {fail_prob:.2f}%
+    </div>
+    """
+    st.markdown(bar_html, unsafe_allow_html=True)
